@@ -94,7 +94,8 @@ uint8_t UserRxBufferFS[APP_RX_DATA_SIZE];
 uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
-
+uint8_t isDefined = 0;
+SensorData recivedData = {0};
 /* USER CODE END PRIVATE_VARIABLES */
 
 /**
@@ -128,7 +129,38 @@ static int8_t CDC_Receive_FS(uint8_t* pbuf, uint32_t *Len);
 static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_DECLARATION */
+int8_t parse_packet(uint8_t *buffer, uint16_t packet_length, SensorData *data) {
+    // Ensure the packet is large enough
+    if (packet_length < 8) { // Minimum size: danger(1) + proximity(4) + roadTypeLength(1) + quality(4)
+        return 0;
+    }
 
+    // Step 1: Extract fields
+    uint8_t *ptr = buffer + 3;
+    data->danger = *ptr; // 1 byte
+    ptr += 1;
+
+    data->dangerProximity = (ptr[0] << 24) | (ptr[1] << 16) | (ptr[2] << 8) | ptr[3]; // 4 bytes
+    ptr += 4;
+
+    uint8_t roadTypeLength = *ptr; // 1 byte
+    ptr += 1;
+
+    // Ensure the roadType string fits within the buffer
+    if (roadTypeLength >= sizeof(data->roadType)) {
+        return 0; // String too long
+    }
+
+    // Copy roadType string
+    memcpy(data->roadType, ptr, roadTypeLength);
+    data->roadType[roadTypeLength] = '\0'; // Null-terminate
+    ptr += roadTypeLength;
+
+    // Extract roadQuality
+    data->roadQuality = (ptr[0] << 24) | (ptr[1] << 16) | (ptr[2] << 8) | ptr[3]; // 4 bytes
+
+    return 1;
+}
 /* USER CODE END PRIVATE_FUNCTIONS_DECLARATION */
 
 /**
@@ -261,9 +293,21 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
-  USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-  return (USBD_OK);
+	SensorData data;
+	if(!parse_packet(Buf, *Len, &data)){
+		uint8_t error_response[] = "Invalid packet format";
+		CDC_Transmit_FS(error_response, strlen((char*)error_response));
+		return USBD_FAIL;
+	}
+
+	recivedData = data;
+	isDefined = 1;
+
+	USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
+	USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+
+	HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_13);
+	return (USBD_OK);
   /* USER CODE END 6 */
 }
 

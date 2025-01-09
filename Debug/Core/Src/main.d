@@ -51,7 +51,10 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/portable/GCC/ARM_CM4F/portmacro.h \
  C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/mpu_wrappers.h \
  C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/task.h \
- C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/list.h
+ C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/list.h \
+ C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/semphr.h \
+ C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/queue.h \
+ C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/task.h
 ../Core/Inc/main.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h:
 ../Core/Inc/stm32f4xx_hal_conf.h:
@@ -107,3 +110,6 @@ C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/porta
 C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/mpu_wrappers.h:
 C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/task.h:
 C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/list.h:
+C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/semphr.h:
+C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/queue.h:
+C:/Users/mihap/STM32CubeIDE/workspace_1.16.1/PRIM-FreeRTOS/FreeRTOS/Source/include/task.h:

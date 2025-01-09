@@ -26,6 +26,8 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
+
+#include "semphr.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,7 +54,7 @@ I2S_HandleTypeDef hi2s3;
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
-
+SemaphoreHandle_t mutexHandle;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -67,10 +69,13 @@ static void MX_SPI1_Init(void);
 uint8_t i2c1_pisiRegister(uint8_t, uint8_t, uint8_t);
 void i2c1_beriRegistre(uint8_t, uint8_t, uint8_t*, uint8_t);
 void initOrientation(void);
+
 uint8_t spi1_beriRegister(uint8_t);
 void spi1_beriRegistre(uint8_t, uint8_t*, uint8_t);
 void spi1_pisiRegister(uint8_t, uint8_t);
 void initGyro(void);
+
+void initMutex(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -128,17 +133,81 @@ void initGyro() { // ne pozabit klicat te funkcije
     spi1_pisiRegister(0x20, 0x0F); // zbudi ziroskop in omogoci osi
 }
 
-void vTask1(void *pvParameters){
-	for(;;){
-		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);  // Toggle an LED
-		vTaskDelay(500 / portTICK_PERIOD_MS);  // Delay for 500ms
+void initMutex(void){
+	mutexHandle = xSemaphoreCreateMutex();
+	if (mutexHandle == NULL) {
+		Error_Handler();
 	}
 }
 
-void vTask2(void *pvParameters){
-	for(;;){
-		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_13);  // Toggle an LED
-		vTaskDelay(1000 / portTICK_PERIOD_MS);  // Delay for 500ms
+void sendDataGyro(void *pvParameters){
+	while(1){
+		int16_t meritev[4];
+		meritev[0] = 0xaaab;
+
+		spi1_beriRegistre(0x28, (uint8_t*)&meritev[1], 6);
+
+		// POZOR: tukaj čakamo, dokler na PC-ju podatkov ne preberemo
+		while(CDC_Transmit_FS((uint8_t*)&meritev, 8));
+		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+		vTaskDelay(200 / portTICK_PERIOD_MS);  // Delay for 500ms
+	}
+}
+
+void sendDataAccelerometer(void *pvParameters){
+	while(1){
+		int16_t meritev[4];
+		meritev[0] = 0xaaac;
+
+		i2c1_beriRegistre(0x19, 0x28,(uint8_t*)&meritev[1], 6);
+
+		while(CDC_Transmit_FS((uint8_t*)&meritev, 8));
+		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+		vTaskDelay(200 / portTICK_PERIOD_MS);  // Delay for 500ms
+	}
+}
+
+void update_pwm_brightness(TIM_HandleTypeDef *htim, uint32_t channel, uint8_t brightness_level) {
+    uint32_t ccr_value = (brightness_level * (ARR_VALUE + 1)) / 100;
+
+    __HAL_TIM_SET_COMPARE(htim, channel, ccr_value);
+}
+
+void checkDir(uint8_t value, int8_t *dir, int8_t max, int8_t min){
+	if(value >= max)
+		dir = -1;
+	else if(value <= min)
+		dir = 1;
+}
+
+void GPIO_control(void *pvParameters){
+	while(1){
+		if(isDefined){
+			if(recivedData.danger)
+				HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, SET);
+			else
+				HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, RESET);
+
+			update_pwm_brightness(&htim4, TIM_CHANNEL_2, status);
+
+			if(recivedData.roadType[0] == 'A'){
+				update_pwm_brightness(&htim4, TIM_CHANNEL_1, 0);
+				update_pwm_brightness(&htim4, TIM_CHANNEL_4, roadType);
+			}
+			else{
+				update_pwm_brightness(&htim4, TIM_CHANNEL_4, 0);
+				update_pwm_brightness(&htim4, TIM_CHANNEL_1, roadType);
+			}
+
+			status += recivedData.danger ? 10 * (recivedData.dangerProximity / 20) * dir_Status :  10 * dir_Status;
+			roadType += 10 * ((100 - recivedData.roadQuality) / 20) * dir_RoadType;
+
+			checkDir(status, &dir_Status, 100, 0);
+			checkDir(roadType, &dir_RoadType, 100, 0);
+		}
+		else{
+			HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+		}
 	}
 }
 /* USER CODE END 0 */
@@ -181,6 +250,8 @@ int main(void)
   MX_SPI1_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
+  initMutex();
+
   __HAL_I2C_ENABLE(&hi2c1);
   initOrientation();
 
@@ -188,19 +259,35 @@ int main(void)
   HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET); // CS postavimo na 1
   initGyro();
 
+  // zazenemo casovnik
+  HAL_TIM_Base_Start(&htim4);
+
+  // zazenemo PWM - neinvertirani izhodi
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
+
   xTaskCreate(
-		vTask1,       /* Function that implements the task. */
-		"vTask1",          /* Text name for the task. */
+		sendDataGyro,       /* Function that implements the task. */
+		"sendData_Gyro",          /* Text name for the task. */
 		128,      /* Stack size in words, not bytes. */
 		NULL,    /* Parameter passed into the task. */
 		1,/* Priority at which the task is created. */
 		NULL);      /* Used to pass out the created task's handle. */
   xTaskCreate(
-		vTask2,       /* Function that implements the task. */
-		"vTask2",          /* Text name for the task. */
+		sendDataAccelerometer,       /* Function that implements the task. */
+		"sendData_Accelerometer",          /* Text name for the task. */
 		128,      /* Stack size in words, not bytes. */
 		NULL,    /* Parameter passed into the task. */
-		2,/* Priority at which the task is created. */
+		1,/* Priority at which the task is created. */
+		NULL);      /* Used to pass out the created task's handle. */
+  xTaskCreate(
+		GPIO_control,       /* Function that implements the task. */
+		"GPIO_control",          /* Text name for the task. */
+		128,      /* Stack size in words, not bytes. */
+		NULL,    /* Parameter passed into the task. */
+		1,/* Priority at which the task is created. */
 		NULL);      /* Used to pass out the created task's handle. */
   vTaskStartScheduler();
   /* USER CODE END 2 */

@@ -64,7 +64,16 @@
   */
 
 /* USER CODE BEGIN EXPORTED_TYPES */
+extern uint8_t isDefined;
 
+typedef struct {
+ int8_t danger;
+ int32_t dangerProximity;
+ char roadType[5]; // Max size for roadType
+ uint32_t roadQuality;
+}SensorData;
+
+extern SensorData recivedData;
 /* USER CODE END EXPORTED_TYPES */
 
 /**
