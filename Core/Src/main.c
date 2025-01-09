@@ -57,9 +57,21 @@ TIM_HandleTypeDef htim4;
 
 /* USER CODE BEGIN PV */
 typedef struct {
+
     int16_t gyroData[3];  // x, y, z axes
     int16_t accelData[3]; // x, y, z axes
 } STM_SensorData;
+
+typedef struct {
+    uint8_t packetID;    // Identifier for the packet
+    uint16_t dataSize;   // Size of the payload (gyroscope + accelerometer data)
+    uint32_t timestamp;  // Optional: Timestamp for the data (in ms)
+} PacketHeader;
+
+typedef struct {
+    PacketHeader header; // Packet header
+    STM_SensorData data;     // Sensor data (gyroscope + accelerometer)
+} SensorPacket;
 
 typedef struct {
     int8_t dir_status;
@@ -68,7 +80,9 @@ typedef struct {
     uint8_t roadType;
 } GPIOControlParams;
 
-SemaphoreHandle_t mutexHandle;
+STM_SensorData sharedSensorData;
+SemaphoreHandle_t dataMutex;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -149,58 +163,59 @@ void initGyro() { // ne pozabit klicat te funkcije
 }
 
 void initMutex(void){
-	mutexHandle = xSemaphoreCreateMutex();
-	if (mutexHandle == NULL) {
-		Error_Handler();
-	}
+    dataMutex = xSemaphoreCreateMutex();
+    if (dataMutex == NULL) {
+        Error_Handler(); // Handle error if mutex creation fails
+    }
 }
 
-void sendDataGyro(void *pvParameters){
-	while(1){
-		int16_t meritev[4];
-		meritev[0] = 0xaaab;
+void getGyroData(void *pvParameters) {
+    while (1) {
+        int16_t gyro[3];
+        spi1_beriRegistre(0x28, (uint8_t *)gyro, 6); // Example gyro read
 
-		spi1_beriRegistre(0x28, (uint8_t*)&meritev[1], 6);
+        // Protect shared data with mutex
+        xSemaphoreTake(dataMutex, portMAX_DELAY);
+        memcpy(sharedSensorData.gyroData, gyro, sizeof(gyro));
+        xSemaphoreGive(dataMutex);
 
-		// POZOR: tukaj �?akamo, dokler na PC-ju podatkov ne preberemo
-		while(CDC_Transmit_FS((uint8_t*)&meritev, 8));
-//		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
-		vTaskDelay(200 / portTICK_PERIOD_MS);  // Delay for 500ms
-	}
+        vTaskDelay(50 / portTICK_PERIOD_MS); // Adjust delay as needed
+    }
 }
 
-void sendDataAccelerometer(void *pvParameters){
-	while(1){
-		int16_t meritev[4];
-		meritev[0] = 0xaaac;
+void getAccelData(void *pvParameters) {
+    while (1) {
+        int16_t accel[3];
+        i2c1_beriRegistre(0x19, 0x28, (uint8_t *)accel, 6); // Example accel read
 
-		i2c1_beriRegistre(0x19, 0x28,(uint8_t*)&meritev[1], 6);
+        // Protect shared data with mutex
+        xSemaphoreTake(dataMutex, portMAX_DELAY);
+        memcpy(sharedSensorData.accelData, accel, sizeof(accel));
+        xSemaphoreGive(dataMutex);
 
-		while(CDC_Transmit_FS((uint8_t*)&meritev, 8));
-//		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
-		vTaskDelay(200 / portTICK_PERIOD_MS);  // Delay for 500ms
-	}
+        vTaskDelay(50 / portTICK_PERIOD_MS); // Adjust delay as needed
+    }
 }
 
-void sendData(void *pvParameters){
-    uint8_t data[18]; // 6 bytes for accelerometer (3 axes * 2 bytes each) + 6 bytes for gyroscope (3 axes * 2 bytes each) + 2 bytes for a header
-    uint8_t* accel_data = &data[2];  // Starting point for accelerometer data (after the header)
-    uint8_t* gyro_data = &data[8];   // Starting point for gyroscope data (after the accelerometer data)
+void sendData(void *pvParameters) {
+	SensorPacket packet;
 
-    // Fill the header or start marker
-    data[0] = 0xaa;
-    data[1] = 0xab;  // Header
+	while (1) {
+		// Safely copy shared sensor data
+		xSemaphoreTake(dataMutex, portMAX_DELAY);
+		packet.data = sharedSensorData;
+		xSemaphoreGive(dataMutex);
 
-    // Get Accelerometer Data (X, Y, Z)
-    i2c1_beriRegistre(0x19, 0x28, (uint8_t*)&accel_data[0], 6); // Read 6 bytes (X, Y, Z)
+		// Populate the header
+		packet.header.packetID = 0xab;
+		packet.header.dataSize = sizeof(SensorData);
+		packet.header.timestamp = xTaskGetTickCount();
 
-    // Get Gyroscope Data (X, Y, Z)
-//    i2c1_beriRegistre(0x6B, 0x28, (uint8_t*)&gyro_data[0], 6);  // Assume gyroscope data starts at 0x28 (for example)
-    spi1_beriRegistre(0x28, (uint8_t*)&gyro_data[0], 6);
-    // Send Data over USB
-    CDC_Transmit_FS(data, 18);  // Send 18 bytes: 2 for header + 6 for accelerometer + 6 for gyroscope
+		// Send the complete packet (header + data)
+		while (CDC_Transmit_FS((uint8_t *)&packet, sizeof(SensorPacket)));
 
-    HAL_Delay(100);
+		vTaskDelay(100 / portTICK_PERIOD_MS); // Adjust delay as needed
+	}
 }
 
 void update_pwm_brightness(TIM_HandleTypeDef *htim, uint32_t channel, uint8_t brightness_level) {
@@ -320,26 +335,16 @@ int main(void)
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
 
   xTaskCreate(
-		sendDataGyro,       /* Function that implements the task. */
-		"sendData_Gyro",          /* Text name for the task. */
+		getGyroData,       /* Function that implements the task. */
+		"getGyroData",          /* Text name for the task. */
 		128,      /* Stack size in words, not bytes. */
 		NULL,    /* Parameter passed into the task. */
 		1,/* Priority at which the task is created. */
 		NULL);      /* Used to pass out the created task's handle. */
-  xTaskCreate(
-		sendDataAccelerometer,       /* Function that implements the task. */
-		"sendData_Accelerometer",          /* Text name for the task. */
-		128,      /* Stack size in words, not bytes. */
-		NULL,    /* Parameter passed into the task. */
-		1,/* Priority at which the task is created. */
-		NULL);      /* Used to pass out the created task's handle. */
-  xTaskCreate(
-		GPIO_control,       /* Function that implements the task. */
-		"GPIO_control",          /* Text name for the task. */
-		128,      /* Stack size in words, not bytes. */
-		(void *)&gpioParams,    /* Parameter passed into the task. */
-		1,/* Priority at which the task is created. */
-		NULL);      /* Used to pass out the created task's handle. */
+  xTaskCreate(getAccelData, "getAccelData", 128, NULL, 1, NULL);
+  xTaskCreate(getAccelData, "getAccelData", 128, NULL, 1, NULL);
+  xTaskCreate(sendData, "sendData", 128, NULL, 1, NULL);
+  xTaskCreate(GPIO_control, "GPIO_control", 128, (void *)&gpioParams, 1, NULL);
   vTaskStartScheduler();
   /* USER CODE END 2 */
 
