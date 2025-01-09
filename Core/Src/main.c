@@ -53,7 +53,21 @@ I2S_HandleTypeDef hi2s3;
 
 SPI_HandleTypeDef hspi1;
 
+TIM_HandleTypeDef htim4;
+
 /* USER CODE BEGIN PV */
+typedef struct {
+    int16_t gyroData[3];  // x, y, z axes
+    int16_t accelData[3]; // x, y, z axes
+} STM_SensorData;
+
+typedef struct {
+    int8_t dir_status;
+    int8_t dir_RoadType;
+    uint8_t status;
+    uint8_t roadType;
+} GPIOControlParams;
+
 SemaphoreHandle_t mutexHandle;
 /* USER CODE END PV */
 
@@ -65,6 +79,7 @@ static void MX_I2C1_Init(void);
 static void MX_I2S2_Init(void);
 static void MX_I2S3_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 uint8_t i2c1_pisiRegister(uint8_t, uint8_t, uint8_t);
 void i2c1_beriRegistre(uint8_t, uint8_t, uint8_t*, uint8_t);
@@ -147,9 +162,9 @@ void sendDataGyro(void *pvParameters){
 
 		spi1_beriRegistre(0x28, (uint8_t*)&meritev[1], 6);
 
-		// POZOR: tukaj čakamo, dokler na PC-ju podatkov ne preberemo
+		// POZOR: tukaj �?akamo, dokler na PC-ju podatkov ne preberemo
 		while(CDC_Transmit_FS((uint8_t*)&meritev, 8));
-		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+//		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
 		vTaskDelay(200 / portTICK_PERIOD_MS);  // Delay for 500ms
 	}
 }
@@ -162,13 +177,34 @@ void sendDataAccelerometer(void *pvParameters){
 		i2c1_beriRegistre(0x19, 0x28,(uint8_t*)&meritev[1], 6);
 
 		while(CDC_Transmit_FS((uint8_t*)&meritev, 8));
-		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+//		HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
 		vTaskDelay(200 / portTICK_PERIOD_MS);  // Delay for 500ms
 	}
 }
 
+void sendData(void *pvParameters){
+    uint8_t data[18]; // 6 bytes for accelerometer (3 axes * 2 bytes each) + 6 bytes for gyroscope (3 axes * 2 bytes each) + 2 bytes for a header
+    uint8_t* accel_data = &data[2];  // Starting point for accelerometer data (after the header)
+    uint8_t* gyro_data = &data[8];   // Starting point for gyroscope data (after the accelerometer data)
+
+    // Fill the header or start marker
+    data[0] = 0xaa;
+    data[1] = 0xab;  // Header
+
+    // Get Accelerometer Data (X, Y, Z)
+    i2c1_beriRegistre(0x19, 0x28, (uint8_t*)&accel_data[0], 6); // Read 6 bytes (X, Y, Z)
+
+    // Get Gyroscope Data (X, Y, Z)
+//    i2c1_beriRegistre(0x6B, 0x28, (uint8_t*)&gyro_data[0], 6);  // Assume gyroscope data starts at 0x28 (for example)
+    spi1_beriRegistre(0x28, (uint8_t*)&gyro_data[0], 6);
+    // Send Data over USB
+    CDC_Transmit_FS(data, 18);  // Send 18 bytes: 2 for header + 6 for accelerometer + 6 for gyroscope
+
+    HAL_Delay(100);
+}
+
 void update_pwm_brightness(TIM_HandleTypeDef *htim, uint32_t channel, uint8_t brightness_level) {
-    uint32_t ccr_value = (brightness_level * (ARR_VALUE + 1)) / 100;
+    uint32_t ccr_value = (brightness_level * (999 + 1)) / 100;
 
     __HAL_TIM_SET_COMPARE(htim, channel, ccr_value);
 }
@@ -181,6 +217,13 @@ void checkDir(uint8_t value, int8_t *dir, int8_t max, int8_t min){
 }
 
 void GPIO_control(void *pvParameters){
+	GPIOControlParams *params = (GPIOControlParams *)pvParameters;
+
+	int8_t dir_status = params->dir_status;
+	int8_t dir_RoadType = params->dir_RoadType;
+	uint8_t status = params->status;
+	uint8_t roadType = params->roadType;
+
 	while(1){
 		if(isDefined){
 			if(recivedData.danger)
@@ -199,10 +242,10 @@ void GPIO_control(void *pvParameters){
 				update_pwm_brightness(&htim4, TIM_CHANNEL_1, roadType);
 			}
 
-			status += recivedData.danger ? 10 * (recivedData.dangerProximity / 20) * dir_Status :  10 * dir_Status;
+			status += recivedData.danger ? 10 * (recivedData.dangerProximity / 20) * dir_status :  10 * dir_status;
 			roadType += 10 * ((100 - recivedData.roadQuality) / 20) * dir_RoadType;
 
-			checkDir(status, &dir_Status, 100, 0);
+			checkDir(status, &dir_status, 100, 0);
 			checkDir(roadType, &dir_RoadType, 100, 0);
 		}
 		else{
@@ -249,7 +292,15 @@ int main(void)
   MX_I2S3_Init();
   MX_SPI1_Init();
   MX_USB_DEVICE_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
+  GPIOControlParams gpioParams = {
+      .dir_status = 1,
+      .dir_RoadType = 1,
+      .status = 0,
+      .roadType = 0
+  };
+
   initMutex();
 
   __HAL_I2C_ENABLE(&hi2c1);
@@ -265,7 +316,7 @@ int main(void)
   // zazenemo PWM - neinvertirani izhodi
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+//  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
 
   xTaskCreate(
@@ -286,7 +337,7 @@ int main(void)
 		GPIO_control,       /* Function that implements the task. */
 		"GPIO_control",          /* Text name for the task. */
 		128,      /* Stack size in words, not bytes. */
-		NULL,    /* Parameter passed into the task. */
+		(void *)&gpioParams,    /* Parameter passed into the task. */
 		1,/* Priority at which the task is created. */
 		NULL);      /* Used to pass out the created task's handle. */
   vTaskStartScheduler();
@@ -509,6 +560,73 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 83;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 999;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+  HAL_TIM_MspPostInit(&htim4);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -534,8 +652,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(OTG_FS_PowerSwitchOn_GPIO_Port, OTG_FS_PowerSwitchOn_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, LD4_Pin|LD3_Pin|LD5_Pin|LD6_Pin
-                          |Audio_RST_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14|Audio_RST_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : DATA_Ready_Pin */
   GPIO_InitStruct.Pin = DATA_Ready_Pin;
@@ -569,10 +686,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LD4_Pin LD3_Pin LD5_Pin LD6_Pin
-                           Audio_RST_Pin */
-  GPIO_InitStruct.Pin = LD4_Pin|LD3_Pin|LD5_Pin|LD6_Pin
-                          |Audio_RST_Pin;
+  /*Configure GPIO pins : PD14 Audio_RST_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_14|Audio_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
