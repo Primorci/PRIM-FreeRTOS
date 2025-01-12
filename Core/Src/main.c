@@ -32,32 +32,12 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
-I2C_HandleTypeDef hi2c1;
-
-I2S_HandleTypeDef hi2s2;
-I2S_HandleTypeDef hi2s3;
-
-SPI_HandleTypeDef hspi1;
-
-TIM_HandleTypeDef htim4;
-
-/* USER CODE BEGIN PV */
 typedef struct {
+    int gyroStatus;  // 0 = OK, 1 = Sensor Read Error, 2 = Mutex Error
+    int accelStatus; // 0 = OK, 1 = Sensor Read Error, 2 = Mutex Error
+} SystemStatus;
 
+typedef struct {
     int16_t gyroData[3];  // x, y, z axes
     int16_t accelData[3]; // x, y, z axes
 } STM_SensorData;
@@ -79,10 +59,35 @@ typedef struct {
     uint8_t status;
     uint8_t roadType;
 } GPIOControlParams;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define DISPLAY_MODE 0
+#define DEBUG_MODE   1
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+
+I2S_HandleTypeDef hi2s2;
+I2S_HandleTypeDef hi2s3;
+
+SPI_HandleTypeDef hspi1;
+
+TIM_HandleTypeDef htim4;
+
+/* USER CODE BEGIN PV */
+volatile uint8_t currentMode = DISPLAY_MODE; // Start in display mode
 
 STM_SensorData sharedSensorData;
 SemaphoreHandle_t dataMutex;
-
+SystemStatus sharedStatus;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -96,11 +101,11 @@ static void MX_SPI1_Init(void);
 static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 uint8_t i2c1_pisiRegister(uint8_t, uint8_t, uint8_t);
-void i2c1_beriRegistre(uint8_t, uint8_t, uint8_t*, uint8_t);
+HAL_StatusTypeDef i2c1_beriRegistre(uint8_t, uint8_t, uint8_t*, uint8_t);
 void initOrientation(void);
 
 uint8_t spi1_beriRegister(uint8_t);
-void spi1_beriRegistre(uint8_t, uint8_t*, uint8_t);
+HAL_StatusTypeDef spi1_beriRegistre(uint8_t, uint8_t*, uint8_t);
 void spi1_pisiRegister(uint8_t, uint8_t);
 void initGyro(void);
 
@@ -109,16 +114,19 @@ void initMutex(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
 uint8_t i2c1_pisiRegister(uint8_t naprava, uint8_t reg, uint8_t podatek) {
     naprava <<= 1;
     return HAL_I2C_Mem_Write(&hi2c1, naprava, reg, I2C_MEMADD_SIZE_8BIT, &podatek, 1, 10);
 }
 
-void i2c1_beriRegistre(uint8_t naprava, uint8_t reg, uint8_t* podatek, uint8_t dolzina) {
+HAL_StatusTypeDef i2c1_beriRegistre(uint8_t naprava, uint8_t reg, uint8_t* podatek, uint8_t dolzina) {
     if ((dolzina>1)&&(naprava==0x19))  // ce je naprava 0x19 moramo postaviti ta bit, ce zelimo brati vec zlogov
         reg |= 0x80;
     naprava <<= 1;
-    HAL_I2C_Mem_Read(&hi2c1, naprava, reg, I2C_MEMADD_SIZE_8BIT, podatek, dolzina, dolzina);
+    HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&hi2c1, naprava, reg, I2C_MEMADD_SIZE_8BIT, podatek, dolzina, dolzina);
+
+	return status;
 }
 
 void initOrientation() { // ne pozabit klicati te funkcije
@@ -145,12 +153,14 @@ void spi1_pisiRegister(uint8_t reg, uint8_t vrednost) {
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
 }
 
-void spi1_beriRegistre(uint8_t reg, uint8_t* buffer, uint8_t velikost) {
+HAL_StatusTypeDef spi1_beriRegistre(uint8_t reg, uint8_t* buffer, uint8_t velikost) {
     reg |= 0xC0; // najpomembnejsa bita na 1
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
-    HAL_SPI_Transmit(&hspi1, &reg, 1, 10); // blocking posiljanje....
-    HAL_SPI_Receive(&hspi1,  buffer, velikost, velikost); // blocking posiljanje....
+    HAL_StatusTypeDef status_SPI_Transmit = HAL_SPI_Transmit(&hspi1, &reg, 1, 10); // blocking posiljanje....
+    HAL_StatusTypeDef status_SPI_Receive = HAL_SPI_Receive(&hspi1,  buffer, velikost, velikost); // blocking posiljanje....
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+
+    return status_SPI_Transmit != HAL_OK ? HAL_ERROR : status_SPI_Receive != HAL_OK ? HAL_ERROR : HAL_OK;
 }
 
 void initGyro() { // ne pozabit klicat te funkcije
@@ -170,31 +180,59 @@ void initMutex(void){
 }
 
 void getGyroData(void *pvParameters) {
-    while (1) {
-        int16_t gyro[3];
-        spi1_beriRegistre(0x28, (uint8_t *)gyro, 6); // Example gyro read
-
-        // Protect shared data with mutex
-        xSemaphoreTake(dataMutex, portMAX_DELAY);
-        memcpy(sharedSensorData.gyroData, gyro, sizeof(gyro));
-        xSemaphoreGive(dataMutex);
-
-        vTaskDelay(50 / portTICK_PERIOD_MS); // Adjust delay as needed
-    }
+	while (1) {
+		int16_t gyro[3];
+		if (spi1_beriRegistre(0x28, (uint8_t *)gyro, 6) == HAL_OK) {
+			// Protect shared data with mutex
+			if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+				memcpy(sharedSensorData.gyroData, gyro, sizeof(gyro));
+				xSemaphoreGive(dataMutex);
+				sharedStatus.gyroStatus = 0; // Update status to OK
+			} else {
+				sharedStatus.gyroStatus = 2; // Mutex acquisition error
+			}
+		} else {
+			sharedStatus.gyroStatus = 1; // Sensor read error
+			for(uint8_t i = 0; i < 3; i++)
+				gyro[i] = 0;
+			if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+				memcpy(sharedSensorData.gyroData, gyro, sizeof(gyro));
+				xSemaphoreGive(dataMutex);
+				sharedStatus.gyroStatus = 0; // Update status to OK
+			} else {
+				sharedStatus.gyroStatus = 2; // Mutex acquisition error
+			}
+		}
+		vTaskDelay(pdMS_TO_TICKS(50)); // Adjust delay as needed
+	}
 }
 
 void getAccelData(void *pvParameters) {
-    while (1) {
-        int16_t accel[3];
-        i2c1_beriRegistre(0x19, 0x28, (uint8_t *)accel, 6); // Example accel read
-
-        // Protect shared data with mutex
-        xSemaphoreTake(dataMutex, portMAX_DELAY);
-        memcpy(sharedSensorData.accelData, accel, sizeof(accel));
-        xSemaphoreGive(dataMutex);
-
-        vTaskDelay(50 / portTICK_PERIOD_MS); // Adjust delay as needed
-    }
+	while (1) {
+		int16_t accel[3];
+		if (i2c1_beriRegistre(0x19, 0x28, (uint8_t *)accel, 6) == HAL_OK) {
+			// Protect shared data with mutex
+			if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+				memcpy(sharedSensorData.accelData, accel, sizeof(accel));
+				xSemaphoreGive(dataMutex);
+				sharedStatus.accelStatus = 0; // Update status to OK
+			} else {
+				sharedStatus.accelStatus = 2; // Mutex acquisition error
+			}
+		} else {
+			sharedStatus.accelStatus = 1; // Sensor read error
+			for(uint8_t i = 0; i < 3; i++)
+				accel[i] = 0;
+			if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+				memcpy(sharedSensorData.accelData, accel, sizeof(accel));
+				xSemaphoreGive(dataMutex);
+				sharedStatus.accelStatus = 0; // Update status to OK
+			} else {
+				sharedStatus.accelStatus = 2; // Mutex acquisition error
+			}
+		}
+		vTaskDelay(pdMS_TO_TICKS(50)); // Adjust delay as needed
+	}
 }
 
 void sendData(void *pvParameters) {
@@ -226,9 +264,9 @@ void update_pwm_brightness(TIM_HandleTypeDef *htim, uint32_t channel, uint8_t br
 
 void checkDir(uint8_t value, int8_t *dir, int8_t max, int8_t min){
 	if(value >= max)
-		dir = -1;
+		*dir = -1;
 	else if(value <= min)
-		dir = 1;
+		*dir = 1;
 }
 
 void GPIO_control(void *pvParameters){
@@ -238,36 +276,58 @@ void GPIO_control(void *pvParameters){
 	int8_t dir_RoadType = params->dir_RoadType;
 	uint8_t status = params->status;
 	uint8_t roadType = params->roadType;
+    uint8_t toggle = 0;
 
 	while(1){
-		if(isDefined){
-			if(recivedData.danger)
-				HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, SET);
-			else
-				HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, RESET);
+		if (currentMode == DISPLAY_MODE) {
+			if(isDefined){
+				// Update LED for danger status
+				update_pwm_brightness(&htim4, TIM_CHANNEL_3, recivedData.danger ? 100 : 0);
 
-			update_pwm_brightness(&htim4, TIM_CHANNEL_2, status);
+				// Update LED for status
+				update_pwm_brightness(&htim4, TIM_CHANNEL_2, (uint8_t)status);
 
-			if(recivedData.roadType[0] == 'A'){
-				update_pwm_brightness(&htim4, TIM_CHANNEL_1, 0);
-				update_pwm_brightness(&htim4, TIM_CHANNEL_4, roadType);
+				// Update LEDs for road type based on the first character
+				if (recivedData.roadType[0] == 'A') {
+					update_pwm_brightness(&htim4, TIM_CHANNEL_1, 0);
+					update_pwm_brightness(&htim4, TIM_CHANNEL_4, (uint8_t)roadType);
+				} else {
+					update_pwm_brightness(&htim4, TIM_CHANNEL_4, 0);
+					update_pwm_brightness(&htim4, TIM_CHANNEL_1, (uint8_t)roadType);
+				}
+
+				// Update status and roadType values dynamically
+				status += recivedData.danger
+							  ? 10 * (recivedData.dangerProximity / 20) * dir_status
+							  : 10 * dir_status;
+				roadType += 10 * ((100 - recivedData.roadQuality) / 20) * dir_RoadType;
+
+				// Ensure values remain within bounds
+				checkDir(status, &dir_status, 100, 0);
+				checkDir(roadType, &dir_RoadType, 100, 0);
 			}
-			else{
+			else {
+				// Fallback behavior: Toggle TIM_CHANNEL_3
+				toggle = !toggle;
+				update_pwm_brightness(&htim4, TIM_CHANNEL_3, toggle ? 100 : 0);
+
 				update_pwm_brightness(&htim4, TIM_CHANNEL_4, 0);
-				update_pwm_brightness(&htim4, TIM_CHANNEL_1, roadType);
+				update_pwm_brightness(&htim4, TIM_CHANNEL_1, 0);
+				update_pwm_brightness(&htim4, TIM_CHANNEL_2, 0);
 			}
-
-			status += recivedData.danger ? 10 * (recivedData.dangerProximity / 20) * dir_status :  10 * dir_status;
-			roadType += 10 * ((100 - recivedData.roadQuality) / 20) * dir_RoadType;
-
-			checkDir(status, &dir_status, 100, 0);
-			checkDir(roadType, &dir_RoadType, 100, 0);
 		}
 		else{
-			HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_14);
+			toggle = !toggle;
+			update_pwm_brightness(&htim4, TIM_CHANNEL_2, toggle ? 100 : 0);
+			update_pwm_brightness(&htim4, TIM_CHANNEL_4, 0);
+			update_pwm_brightness(&htim4, TIM_CHANNEL_1, 0);
+			update_pwm_brightness(&htim4, TIM_CHANNEL_3, 0);
 		}
+		// Delay for consistent updates
+		vTaskDelay(pdMS_TO_TICKS(100));
 	}
 }
+
 /* USER CODE END 0 */
 
 /**
@@ -331,7 +391,7 @@ int main(void)
   // zazenemo PWM - neinvertirani izhodi
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
-//  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
 
   xTaskCreate(
@@ -620,6 +680,10 @@ static void MX_TIM4_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
@@ -657,7 +721,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(OTG_FS_PowerSwitchOn_GPIO_Port, OTG_FS_PowerSwitchOn_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14|Audio_RST_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(Audio_RST_GPIO_Port, Audio_RST_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : DATA_Ready_Pin */
   GPIO_InitStruct.Pin = DATA_Ready_Pin;
@@ -691,12 +755,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PD14 Audio_RST_Pin */
-  GPIO_InitStruct.Pin = GPIO_PIN_14|Audio_RST_Pin;
+  /*Configure GPIO pin : Audio_RST_Pin */
+  GPIO_InitStruct.Pin = Audio_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  HAL_GPIO_Init(Audio_RST_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : OTG_FS_OverCurrent_Pin */
   GPIO_InitStruct.Pin = OTG_FS_OverCurrent_Pin;
