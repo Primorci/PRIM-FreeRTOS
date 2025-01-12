@@ -33,8 +33,9 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 typedef struct {
-    int gyroStatus;  // 0 = OK, 1 = Sensor Read Error, 2 = Mutex Error
-    int accelStatus; // 0 = OK, 1 = Sensor Read Error, 2 = Mutex Error
+	uint8_t gyroStatus;  // 0 = OK, 1 = Sensor Read Error, 2 = Mutex Error
+	uint8_t accelStatus; // 0 = OK, 1 = Sensor Read Error, 2 = Mutex Error
+	uint8_t sending;
 } SystemStatus;
 
 typedef struct {
@@ -251,6 +252,7 @@ void sendData(void *pvParameters) {
 
 		// Send the complete packet (header + data)
 		while (CDC_Transmit_FS((uint8_t *)&packet, sizeof(SensorPacket)));
+		sharedStatus.sending = 1;
 
 		vTaskDelay(100 / portTICK_PERIOD_MS); // Adjust delay as needed
 	}
@@ -316,6 +318,13 @@ void GPIO_control(void *pvParameters){
 				update_pwm_brightness(&htim4, TIM_CHANNEL_2, 0);
 			}
 		}
+		else if(currentMode == DEBUG_MODE){
+			update_pwm_brightness(&htim4, TIM_CHANNEL_1, (sharedStatus.accelStatus == 0 && sharedStatus.gyroStatus == 0) ? 100 : 0);
+			update_pwm_brightness(&htim4, TIM_CHANNEL_2, 0);
+			update_pwm_brightness(&htim4, TIM_CHANNEL_3, (sharedStatus.accelStatus != 0 || sharedStatus.gyroStatus != 0) ? 100 : 0);
+			update_pwm_brightness(&htim4, TIM_CHANNEL_4, sharedStatus.sending != 0 ? 100 : 0);
+			sharedStatus.sending = sharedStatus.sending == 1 ? 0 : sharedStatus.sending;
+		}
 		else{
 			toggle = !toggle;
 			update_pwm_brightness(&htim4, TIM_CHANNEL_2, toggle ? 100 : 0);
@@ -325,6 +334,20 @@ void GPIO_control(void *pvParameters){
 		}
 		// Delay for consistent updates
 		vTaskDelay(pdMS_TO_TICKS(100));
+	}
+}
+
+void buttonInterupt(void * pvParameters){
+	GPIO_PinState button_prev = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+	while(1){
+		GPIO_PinState button_curr = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+		if(button_prev != button_curr && button_curr == GPIO_PIN_SET){
+			if(currentMode == DISPLAY_MODE)
+				currentMode = DEBUG_MODE;
+			else
+				currentMode = DISPLAY_MODE;
+		}
+		button_prev = button_curr;
 	}
 }
 
@@ -405,6 +428,8 @@ int main(void)
   xTaskCreate(getAccelData, "getAccelData", 128, NULL, 1, NULL);
   xTaskCreate(sendData, "sendData", 128, NULL, 1, NULL);
   xTaskCreate(GPIO_control, "GPIO_control", 128, (void *)&gpioParams, 1, NULL);
+  xTaskCreate(buttonInterupt, "buttonInterupt", 128, NULL, 1, NULL);
+
   vTaskStartScheduler();
   /* USER CODE END 2 */
 
