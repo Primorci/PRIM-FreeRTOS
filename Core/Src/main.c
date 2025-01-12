@@ -89,6 +89,9 @@ volatile uint8_t currentMode = DISPLAY_MODE; // Start in display mode
 STM_SensorData sharedSensorData;
 SemaphoreHandle_t dataMutex;
 SystemStatus sharedStatus;
+
+TaskHandle_t txHandle = NULL;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -253,6 +256,7 @@ void sendData(void *pvParameters) {
 		// Send the complete packet (header + data)
 		while (CDC_Transmit_FS((uint8_t *)&packet, sizeof(SensorPacket)));
 		sharedStatus.sending = 1;
+        xTaskNotifyGive(txHandle);
 
 		vTaskDelay(100 / portTICK_PERIOD_MS); // Adjust delay as needed
 	}
@@ -269,6 +273,17 @@ void checkDir(uint8_t value, int8_t *dir, int8_t max, int8_t min){
 		*dir = -1;
 	else if(value <= min)
 		*dir = 1;
+}
+
+void debug_tx(void *pvParameters){
+	uint8_t toggle = 0;
+	while(1){
+		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		if(currentMode == DEBUG_MODE){
+			update_pwm_brightness(&htim4, TIM_CHANNEL_4, toggle ? 100 : 0);
+			toggle = !toggle;
+		}
+	}
 }
 
 void GPIO_control(void *pvParameters){
@@ -322,7 +337,6 @@ void GPIO_control(void *pvParameters){
 			update_pwm_brightness(&htim4, TIM_CHANNEL_1, (sharedStatus.accelStatus == 0 && sharedStatus.gyroStatus == 0) ? 100 : 0);
 			update_pwm_brightness(&htim4, TIM_CHANNEL_2, 0);
 			update_pwm_brightness(&htim4, TIM_CHANNEL_3, (sharedStatus.accelStatus != 0 || sharedStatus.gyroStatus != 0) ? 100 : 0);
-			update_pwm_brightness(&htim4, TIM_CHANNEL_4, sharedStatus.sending != 0 ? 100 : 0);
 			sharedStatus.sending = sharedStatus.sending == 1 ? 0 : sharedStatus.sending;
 		}
 		else{
@@ -425,9 +439,9 @@ int main(void)
 		1,/* Priority at which the task is created. */
 		NULL);      /* Used to pass out the created task's handle. */
   xTaskCreate(getAccelData, "getAccelData", 128, NULL, 1, NULL);
-  xTaskCreate(getAccelData, "getAccelData", 128, NULL, 1, NULL);
   xTaskCreate(sendData, "sendData", 128, NULL, 1, NULL);
-  xTaskCreate(GPIO_control, "GPIO_control", 128, (void *)&gpioParams, 1, NULL);
+  xTaskCreate(GPIO_control, "GPIO_control", 128, (void *)&gpioParams, 2, NULL);
+  xTaskCreate(GPIO_control, "debug_tx", 128, NULL, 2, &txHandle);
   xTaskCreate(buttonInterupt, "buttonInterupt", 128, NULL, 1, NULL);
 
   vTaskStartScheduler();
