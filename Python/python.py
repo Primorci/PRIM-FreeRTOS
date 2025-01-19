@@ -28,28 +28,96 @@ start_http_server(5555)
 # IP address and port of MQTT Broker (Mosquitto MQTT)
 broker = "10.8.1.6"
 port = 1883
-topic = "/STM"
+publish_topic = "/STM"
+subscribe_topic= "/YOLO/result"
 
-def on_connect(client, userdata, flags, reasonCode, properties=None):
-    if reasonCode == 0:
-        print("Connected to MQTT Broker successfully.")
-    else:
-        print(f"Failed to connect to MQTT Broker. Reason: {reasonCode}")
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code.is_failure:
+        print(f"Failed to connect: {reason_code}. loop_forever() will retry connection")
         errors.inc()
+    else:
+        print("Connected to MQTT Broker successfully.")
+        client.subscribe(subscribe_topic)
 
-def on_disconnect(client, userdata, rc):
-    print(f"Disconnected from MQTT Broker. Reason: {rc}")
+def on_subscribe(client, userdata, mid, reason_code_list, properties):
+    # Since we subscribed only for a single channel, reason_code_list contains
+    # a single entry
+    if reason_code_list[0].is_failure:
+        print(f"Broker rejected you subscription: {reason_code_list[0]}")
+    else:
+        print(f"Broker granted the following QoS: {reason_code_list[0].value}")
 
-producer = mqtt.Client(client_id="producer_1", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+def on_unsubscribe(client, userdata, mid, reason_code_list, properties):
+    # Be careful, the reason_code_list is only present in MQTTv5.
+    # In MQTTv3 it will always be empty
+    if len(reason_code_list) == 0 or not reason_code_list[0].is_failure:
+        print("unsubscribe succeeded (if SUBACK is received in MQTTv3 it success)")
+    else:
+        print(f"Broker replied with failure: {reason_code_list[0]}")
+    client.disconnect()
+
+# def on_message(client, userdata, msg):
+#     global latest_msg
+#     # Decode the message payload
+#     try:
+#         latest_message = json.loads(msg.payload.decode())
+#         print(f"Latest MQTT Message Received: {latest_message}")
+        
+#         # Update Prometheus metrics (example: increment packet count)
+#         packets_received.inc()
+        
+#         # Optionally, process the data (example: update gauges)
+#         if "gyro" in latest_message:
+#             gyro_x.set(latest_message["gyro"]["x"])
+#             gyro_y.set(latest_message["gyro"]["y"])
+#             gyro_z.set(latest_message["gyro"]["z"])
+#         if "accel" in latest_message:
+#             accel_x.set(latest_message["accel"]["x"])
+#             accel_y.set(latest_message["accel"]["y"])
+#             accel_z.set(latest_message["accel"]["z"])
+#     except json.JSONDecodeError:
+#         print("Error decoding MQTT message payload")
+#         errors.inc()
+
+def on_message(client, userdata, msg):
+    data = json.loads(msg.payload.decode())
+    if 'error' in data:
+        error_message = data['error']
+        if "Failed to read image" in error_message:
+            print("Error detected:", error_message)
+    else: 
+        isDanger = data.get("detected_danger", False)  # Defaulting to False if not found
+        dangerType = data.get("danger_type", [])  # Defaulting to an empty list if not found
+        roadType = data.get("road_type", [])  # Defaulting to an empty list if not found
+
+        print(f"MQTT Recived: [isDanger: {isDanger}, dangerType: {', '.join(dangerType)} roadType: {roadType}]")
+
+        danger:bool = isDanger# True -> there is danger :: False -> there is no danger
+        dangerProximity:int = random.randint(0, 100) if danger else -1 # 0 - 100 how close the danger is :: -1 no danger
+        roadType:str = "A" if choose_primary_road(roadType) == "Asfalt" else "M"
+        roadQuality:int = random.randint(0, 100)# 0 - 100 the quality of the road
+
+        packet = create_packet(danger, dangerProximity, roadType, roadQuality)
+        print(f"Packet: {packet}")
+
+        parsed_data = parse_packet(packet)
+        print(f"Parsed Data: {parsed_data}")
+
+        safe_serial_write(packet)
+
+mqttClient = mqtt.Client(client_id="STM_client", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 
 # Connect to MQTT broker
 try:
     # Setup MQTT client
-    producer.on_connect = on_connect
-    producer.on_disconnect = on_disconnect
+    mqttClient.on_connect = on_connect
+    mqttClient.on_message = on_message
+    mqttClient.on_subscribe = on_subscribe
+    mqttClient.on_unsubscribe = on_unsubscribe
 
-    producer.connect(broker, port, 60)
-    producer.loop_start()  # Start a new thread to handle network traffic and dispatching callbacks
+    mqttClient.connect(broker, port, 60)
+
+    mqttClient.loop_start()  # Start a new thread to handle network traffic and dispatching callbacks
 except mqtt.MQTTException as e:
     print(f"MQTT error: {e}");
     errors.inc()
@@ -62,18 +130,28 @@ try:
     print(f"Serial connected to port {PORT}")
 except serial.SerialException as e:
     print(f"Serial error: {e}")
+    ser = None
     errors.inc()
 
 serial_lock = threading.Lock()
 
 def safe_serial_read(n):
-    with serial_lock:
-        return ser.read(n)
+    try:
+        with serial_lock:
+            return ser.read(n)
+    except serial.SerialException as e:
+        print(f"Serial error: {e}")
+        errors.inc()
+    return None
 
 def safe_serial_write(data):
-    with serial_lock:
-        ser.write(data)
-        ser.flush()
+    try:
+        with serial_lock:
+            ser.write(data)
+            ser.flush()
+    except serial.SerialException as e:
+        print(f"Serial error: {e}")
+        errors.inc()
 
 def send_command(command):
     print(command)
@@ -90,7 +168,6 @@ def receive_response():
     return None
 
 def create_packet(danger, dangerProximity, roadType, roadQuality):
-    # Encode roadType as a length-prefixed UTF-8 string
     road_type_encoded = roadType.encode('utf-8')
     road_type_length = len(road_type_encoded)
     
@@ -98,26 +175,29 @@ def create_packet(danger, dangerProximity, roadType, roadQuality):
     header_format = '>HB'  # Packet length (2 bytes), Packet type (1 byte)
     body_format = f'>?iB{road_type_length}sI'  # Body format
     
-    # Calculate packet length
     packet_length = struct.calcsize(body_format) + struct.calcsize(header_format)
     
-    # Pack the header
     header = struct.pack(header_format, packet_length, 1)
     
-    # Pack the body
     body = struct.pack(
         body_format,
         danger,
         dangerProximity,
-        road_type_length,  # Length of the road type string
+        road_type_length,
         road_type_encoded,
         roadQuality
     )
     
-    # Combine header and body
     return header + body
 
-# Helper function to decode the packet
+road_priority = ["Asfalt", "Makedam"]
+
+def choose_primary_road(detected_roads):
+    for road_type in road_priority:
+        if road_type in detected_roads:
+            return road_type
+    return None
+
 def parse_packet(packet):
     # Unpack the header
     header_format = '>HB'
@@ -146,26 +226,6 @@ def parse_packet(packet):
         "roadType": roadType,
         "roadQuality": roadQuality
     }
-
-def sim_data():
-    try:
-        while True:
-            danger:bool = random.choice([True, False])# True -> there is danger :: False -> there is no danger
-            dangerProximity:int = random.randint(0, 100) if danger else -1 # 0 - 100 how close the danger is :: -1 no danger
-            roadType:str = random.choice(["A", "G"])# Asphalt or OffRoad
-            roadQuality:int = random.randint(0, 100)# 0 - 100 the quality of the road
-
-            packet = create_packet(danger, dangerProximity, roadType, roadQuality)
-            print(f"Packet: {packet}")
-
-            parsed_data = parse_packet(packet)
-            print(f"Parsed Data: {parsed_data}")
-
-            safe_serial_write(packet)
-
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Exiting...")
 
 PACKET_FORMAT = "B H I h h h h h h"  # Header + gyroscope + accelerometer
 PACKET_SIZE = struct.calcsize(PACKET_FORMAT)  # Calculate the total size
@@ -205,7 +265,6 @@ def read_packet(serial_port, packet_size):
     if len(data) != packet_size:
         raise ValueError("Incomplete packet received")
     return data
-
 
 def recive_data():
     # Open a CSV file to save the data
@@ -247,8 +306,8 @@ def recive_data():
                 accel_z.set(parsed_data["accel"]["z"])
 
 
-                producer.publish(topic + "/gyro", json.dumps(parsed_data["gyro"]), qos=1, retain=False)
-                producer.publish(topic + "/accel", json.dumps(parsed_data["accel"]), qos=1, retain=False)
+                mqttClient.publish(publish_topic + "/gyro", json.dumps(parsed_data["gyro"]), qos=1, retain=False)
+                mqttClient.publish(publish_topic + "/accel", json.dumps(parsed_data["accel"]), qos=1, retain=False)
 
 
 
@@ -260,9 +319,14 @@ def recive_data():
 
 
 if __name__ == "__main__":
-    t_sim_data = threading.Thread(target=sim_data)
+    # t_sim_data = threading.Thread(target=send_yolo_data)
     t_recive_data = threading.Thread(target=recive_data)
 
-    t_sim_data.start()
+    # t_sim_data.start()
     t_recive_data.start()
     # sim_data()
+
+
+    # Join threads
+    # t_sim_data.join()
+    t_recive_data.join()

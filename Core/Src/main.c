@@ -202,7 +202,7 @@ void getGyroData(void *pvParameters) {
 			if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
 				memcpy(sharedSensorData.gyroData, gyro, sizeof(gyro));
 				xSemaphoreGive(dataMutex);
-				sharedStatus.gyroStatus = 0; // Update status to OK
+				sharedStatus.gyroStatus = 1; // Update status to OK
 			} else {
 				sharedStatus.gyroStatus = 2; // Mutex acquisition error
 			}
@@ -230,7 +230,7 @@ void getAccelData(void *pvParameters) {
 			if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
 				memcpy(sharedSensorData.accelData, accel, sizeof(accel));
 				xSemaphoreGive(dataMutex);
-				sharedStatus.accelStatus = 0; // Update status to OK
+				sharedStatus.accelStatus = 1; // Update status to OK
 			} else {
 				sharedStatus.accelStatus = 2; // Mutex acquisition error
 			}
